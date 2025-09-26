@@ -112,7 +112,7 @@ def analyze_crypto(symbol, years=5, show_avg_row=False):
     print(f"\n{symbol} Monthly Return Statistics (Last {years} Years)\n")
     print(monthly_table.groupby("Month")["Return"].agg(["mean","median","std"]).reindex(order).round(2))
 
-# Run all
+# Step 2:  Run all Crypto
 for c in cryptos:
     analyze_crypto(c, years=5, show_avg_row=False)
 
@@ -240,7 +240,7 @@ with pd.ExcelWriter(excel_file, engine="xlsxwriter") as writer:
 
 print(f"\n✅ All results saved to {excel_file}")
 
-## Run bell-sahpe distrubition with 1 SD on price & monthly returns in bar diagram
+## Step 3: Individual Asset Analysis: Run bell-shaped distribution with 1 SD on price & monthly returns in bar diagram
 
 import requests
 import pandas as pd
@@ -389,4 +389,246 @@ else:
     print(f"  std dev (Oct):     {std_oct:.2f}%")
     print(f"  today spot price:  {today_price:,.2f} USD")
     print(f"  ±1σ price range:   {price_low:,.2f} — {price_high:,.2f} USD (≈68%)")
+
+## Step 4: Technical Analysis loaded to Word document
+
+import requests
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from datetime import datetime
+import matplotlib
+import os
+from io import BytesIO
+from docx import Document
+from docx.shared import Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import RGBColor
+
+cryptos = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT", "SUIUSDT"]
+interval = "1d"
+limit = 1000
+
+def get_binance_klines(symbol, interval, start_str, end_str=None, limit=1000):
+    url = "https://api.binance.com/api/v3/klines"
+    params = {"symbol": symbol, "interval": interval, "limit": limit, "startTime": start_str}
+    if end_str:
+        params["endTime"] = end_str
+    response = requests.get(url, params=params)
+    response.raise_for_status()
+    return response.json()
+
+def fetch_full_history(symbol, interval="1d", years=5):
+    all_data = []
+    end_time = int(datetime.now().timestamp() * 1000)
+    start_time = int((datetime.now().timestamp() - years*365*24*3600) * 1000)
+    while start_time < end_time:
+        data = get_binance_klines(symbol, interval, start_time, limit=limit)
+        if not data:
+            break
+        all_data.extend(data)
+        start_time = data[-1][0] + 1
+    return all_data
+
+def analyze_ma_patterns(symbol, doc):
+    # Fetch and prep data
+    data = fetch_full_history(symbol, "1d", years=3)
+    cols = ["open_time","open","high","low","close","volume","close_time",
+            "quote_asset_volume","number_of_trades","taker_buy_base","taker_buy_quote","ignore"]
+    df = pd.DataFrame(data, columns=cols)
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    df["date"] = pd.to_datetime(df["open_time"], unit="ms")
+    df.set_index("date", inplace=True)
+    df = df.sort_index()
+
+    # Keep last 2 years for focused analysis
+    cutoff = df.index.max() - pd.Timedelta(days=365*2)
+    df2y = df.loc[df.index >= cutoff].copy()
+
+    # Compute SMAs with proper minimum periods for stability
+    for w in [10, 50, 100, 200]:
+        df2y[f"SMA{w}"] = df2y["close"].rolling(window=w, min_periods=w//2).mean()
+
+    # Create figure with subplot for chart and space for table
+    fig = plt.figure(figsize=(16, 10))
+    ax1 = plt.subplot2grid((4, 1), (0, 0), rowspan=3)
+    
+    # Plot price and MAs with distinct colors
+    ax1.plot(df2y.index, df2y["close"], color="#000000", linewidth=2.0, label="Close Price", alpha=0.8)
+    colors = {"SMA10":"#1f77b4","SMA50":"#ff7f0e","SMA100":"#2ca02c","SMA200":"#d62728"}
+    line_styles = {"SMA10":"-","SMA50":"--","SMA100":"-.","SMA200":":"}
+    
+    for ma, col in colors.items():
+        ax1.plot(df2y.index, df2y[ma], color=col, linewidth=1.8, 
+                linestyle=line_styles[ma], label=ma, alpha=0.9)
+
+    # Stagger annotations vertically to avoid overlap
+    y_positions = [0.95, 0.90, 0.85, 0.80, 0.75]
+    ma_cols = ["close","SMA10","SMA50","SMA100","SMA200"]
+    
+    for i, (col, ypos) in enumerate(zip(ma_cols, y_positions)):
+        if col in df2y.columns and not df2y[col].isna().all():
+            latest_val = df2y[col].iloc[-1]
+            color = colors.get(col, "#000000")
+            label = "Price" if col == "close" else col
+            ax1.text(0.99, ypos, f"{label}: {latest_val:,.2f}",
+                    transform=ax1.transAxes, fontsize=11, fontweight="bold",
+                    color=color, ha="right", va="center",
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+
+    ax1.set_title(f"{symbol} - 2 Year Moving Average Analysis", fontsize=16, fontweight="bold", pad=20)
+    ax1.set_xlabel("Date", fontsize=12)
+    ax1.set_ylabel("Price", fontsize=12)
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc="upper left", frameon=False, fontsize=10)
+
+    # Create data table below chart
+    ax2 = plt.subplot2grid((4, 1), (3, 0))
+    ax2.axis('off')
+    
+    latest_data = df2y[ma_cols].iloc[-1].round(2)
+    table_data = []
+    for col in ma_cols:
+        val = latest_data[col]
+        if pd.notna(val):
+            table_data.append([col.replace("SMA", "SMA "), f"{val:,.2f}"])
+    
+    table = ax2.table(cellText=table_data,
+                     colLabels=["Indicator", "Current Value"],
+                     cellLoc="center", loc="center",
+                     colWidths=[0.3, 0.3])
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.2, 1.8)
+    
+    for (i, j), cell in table.get_celld().items():
+        if i == 0:
+            cell.set_text_props(weight='bold')
+            cell.set_facecolor('#4472C4')
+            cell.set_text_props(color='white')
+        else:
+            cell.set_facecolor('#F2F2F2' if i % 2 == 0 else 'white')
+
+    plt.tight_layout()
+    
+    # Save chart to memory buffer and add to Word document [web:109]
+    img_buffer = BytesIO()
+    plt.savefig(img_buffer, format='png', dpi=300, bbox_inches='tight')
+    img_buffer.seek(0)
+    
+    # Add section header to Word document [web:115]
+    doc.add_heading(f'{symbol} Technical Analysis', 1)
+    doc.add_picture(img_buffer, width=Inches(7))  # [web:112]
+    
+    plt.show()
+    img_buffer.close()
+
+    # Technical Analysis Commentary
+    analysis_text = []
+    latest = df2y[ma_cols].iloc[-1]
+    price = latest["close"]
+    sma10, sma50, sma100, sma200 = latest["SMA10"], latest["SMA50"], latest["SMA100"], latest["SMA200"]
+    
+    # Trend Analysis
+    analysis_text.append("📊 TREND ANALYSIS:")
+    long_trend = "BULLISH" if sma50 > sma200 else "BEARISH"
+    analysis_text.append(f"   • Long-term (50/200): {long_trend} - 50-day {'above' if sma50 > sma200 else 'below'} 200-day")
+    
+    short_momentum = "BULLISH" if sma10 > sma50 else "BEARISH"
+    analysis_text.append(f"   • Short-term (10/50): {short_momentum} - 10-day {'above' if sma10 > sma50 else 'below'} 50-day")
+    
+    price_position = "ABOVE" if price > sma200 else "BELOW"
+    analysis_text.append(f"   • Price vs 200-day: {price_position} - Price trading {'above' if price > sma200 else 'below'} key long-term support/resistance")
+    
+    # Cross Patterns
+    analysis_text.append("\n🔄 CROSSOVER SIGNALS:")
+    if sma50 > sma200 and sma10 > sma50:
+        analysis_text.append("   • GOLDEN CROSS CONFIRMED: All short-term MAs above long-term - Strong bullish momentum")
+    elif sma50 < sma200 and sma10 < sma50:
+        analysis_text.append("   • DEATH CROSS CONFIRMED: All short-term MAs below long-term - Strong bearish momentum")
+    elif sma10 > sma50 > sma100:
+        analysis_text.append("   • PARTIAL BULLISH SETUP: Short-term bullish but watch 200-day resistance")
+    elif sma10 < sma50 < sma100:
+        analysis_text.append("   • PARTIAL BEARISH SETUP: Short-term bearish momentum building")
+    else:
+        analysis_text.append("   • MIXED SIGNALS: MAs showing conflicting trends - Wait for clearer direction")
+    
+    # Support/Resistance Levels
+    analysis_text.append(f"\n📈 KEY LEVELS:")
+    mas_below = [ma for ma in [sma200, sma100, sma50, sma10] if pd.notna(ma) and ma < price]
+    mas_above = [ma for ma in [sma200, sma100, sma50, sma10] if pd.notna(ma) and ma > price]
+    
+    if mas_below:
+        analysis_text.append(f"   • Nearest Support: {max(mas_below):,.2f} (from MAs below price)")
+    if mas_above:
+        analysis_text.append(f"   • Nearest Resistance: {min(mas_above):,.2f} (from MAs above price)")
+    
+    # Trading Bias
+    ma_stack_bullish = sma10 > sma50 > sma100 > sma200
+    ma_stack_bearish = sma10 < sma50 < sma100 < sma200
+    
+    analysis_text.append(f"\n💡 TRADING BIAS:")
+    if ma_stack_bullish:
+        analysis_text.append("   • STRONG BULLISH: Perfect MA alignment - Favor long positions on dips")
+    elif ma_stack_bearish:
+        analysis_text.append("   • STRONG BEARISH: Perfect MA alignment - Favor short positions on rallies")
+    elif price > sma200:
+        analysis_text.append("   • CAUTIOUSLY BULLISH: Above 200-day but watch for MA resistance")
+    else:
+        analysis_text.append("   • CAUTIOUSLY BEARISH: Below 200-day - Wait for confirmed reversal signals")
+    
+    # Add analysis to Word document [web:115][web:121]
+    for line in analysis_text:
+        p = doc.add_paragraph()
+        run = p.add_run(line)
+        run.font.name = 'Consolas'  # Monospace font for better formatting
+        run.font.size = Inches(0.11)  # Equivalent to 10pt
+        if any(keyword in line for keyword in ['BULLISH', 'GOLDEN CROSS', 'STRONG BULLISH']):
+            run.font.color.rgb = RGBColor(0, 128, 0)  # Green
+        elif any(keyword in line for keyword in ['BEARISH', 'DEATH CROSS', 'STRONG BEARISH']):
+            run.font.color.rgb = RGBColor(255, 0, 0)  # Red
+    
+    doc.add_page_break()  # New page for next crypto
+
+# Main execution - create Word document [web:110][web:115]
+print("🚀 CRYPTO MOVING AVERAGE TECHNICAL ANALYSIS")
+print("=" * 80)
+
+# Create Word document [web:110]
+doc = Document()
+doc.add_heading('Cryptocurrency Moving Average Technical Analysis Report', 0)
+
+# Add report metadata [web:115]
+doc.add_paragraph(f'Generated on: {datetime.now().strftime("%B %d, %Y at %I:%M %p")}')
+doc.add_paragraph('Analysis Period: Last 2 Years')
+doc.add_paragraph('Moving Averages: 10, 50, 100, 200-day Simple Moving Averages')
+doc.add_paragraph('Data Source: Binance API')
+doc.add_page_break()
+
+# Analyze each crypto and add to document
+for crypto in cryptos:
+    print(f"\n📈 Processing {crypto}...")
+    analyze_ma_patterns(crypto, doc)
+
+# Save to desktop [web:122]
+desktop_path = os.path.join(os.path.expanduser('~'), 'Desktop')
+filename = f'Crypto_MA_Analysis_{datetime.now().strftime("%Y%m%d_%H%M")}.docx'
+full_path = os.path.join(desktop_path, filename)
+
+try:
+    doc.save(full_path)
+    print(f"\n✅ Report successfully saved to: {full_path}")
+    print(f"📁 Document saved to Desktop as: {filename}")
+except Exception as e:
+    # Fallback to current directory if desktop access fails
+    fallback_path = filename
+    doc.save(fallback_path)
+    print(f"⚠️  Could not save to Desktop, saved to current directory: {fallback_path}")
+    print(f"Error details: {e}")
+
+print(f"\n🎯 Analysis complete for {len(cryptos)} cryptocurrencies!")
+print("📊 The Word document includes charts, data tables, and technical analysis for each crypto.")
+
+
+    
 
